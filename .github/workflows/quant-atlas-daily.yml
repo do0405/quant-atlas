@@ -1,0 +1,69 @@
+name: Quant Atlas daily collection
+
+on:
+  schedule:
+    # 09:17 Asia/Seoul every day. GitHub schedules use UTC.
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quant-atlas-daily-collection
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SITE_URL: https://quant-research-atlas-2026.snu-chatgpt-5678.chatgpt.site
+      SITE_ACCESS_TOKEN: ${{ secrets.QUANT_ATLAS_SITE_ACCESS_TOKEN }}
+      JOB_TOKEN: ${{ secrets.QUANT_ATLAS_JOB_TOKEN }}
+    steps:
+      - name: Refresh the paper catalog
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { SITE_URL, SITE_ACCESS_TOKEN, JOB_TOKEN } = process.env;
+          if (!SITE_ACCESS_TOKEN || !JOB_TOKEN) {
+            throw new Error('Set both Quant Atlas repository secrets before running.');
+          }
+
+          const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          let refreshed = 0;
+          for (let theme = 0; theme < 10; theme++) {
+            let data;
+            for (let attempt = 0; attempt < 5; attempt++) {
+              const response = await fetch(`${SITE_URL}/api/catalog/job`, {
+                method: 'POST',
+                headers: {
+                  'OAI-Sites-Authorization': `Bearer ${SITE_ACCESS_TOKEN}`,
+                  'X-Quant-Atlas-Job-Token': JOB_TOKEN,
+                },
+              });
+              if (response.status === 429 || response.status >= 500) {
+                if (attempt === 4) throw new Error(`Site returned HTTP ${response.status} after retries.`);
+                const retryAfter = Number(response.headers.get('retry-after'));
+                const delay = Number.isFinite(retryAfter) && retryAfter > 0
+                  ? Math.min(retryAfter * 1000, 60000)
+                  : Math.min(2000 * 2 ** attempt, 30000);
+                await pause(delay);
+                continue;
+              }
+              if (!response.ok) throw new Error(`Site returned HTTP ${response.status}. Check access and job secrets.`);
+              data = await response.json();
+              break;
+            }
+            if (data.upToDate) break;
+            refreshed++;
+            if (data.status === 'partial') {
+              console.warn(`Theme ${data.theme}: partial source coverage; ${data.sourceFailures?.length ?? 0} source failure(s).`);
+            } else {
+              console.log(`Theme ${data.theme}: ${data.inserted} new, ${data.updated} updated.`);
+            }
+          }
+          console.log(`Collection finished: ${refreshed} theme(s) refreshed.`);
+          NODE
+
